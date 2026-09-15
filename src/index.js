@@ -29,6 +29,9 @@ async function pollLoop() {
       }
     } catch (e) {
       log('getUpdates failed:', e.message);
+      if (String(e.message).includes("can't use getUpdates")) {
+        await tg('deleteWebhook', { drop_pending_updates: false }).catch(() => {});
+      }
       await sleep(3000);
     }
   }
@@ -68,6 +71,13 @@ async function main() {
   startHealthServer();
   await checkSteam({ seed: true });
   setInterval(() => checkSteam().catch(e => log('scheduled check failed:', e.message)), config.intervalMs);
+
+  try {
+    await tg('deleteWebhook', { drop_pending_updates: false });
+  } catch (e) {
+    log('deleteWebhook failed:', e.message);
+  }
+
   await pollLoop();
 }
 
