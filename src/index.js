@@ -67,6 +67,10 @@ async function main() {
     console.error('BOT_TOKEN or TELEGRAM_BOT_TOKEN is required');
     process.exit(1);
   }
+  if (!config.databaseUrl) {
+    console.error('DATABASE_URL is required (set it in .env or the environment)');
+    process.exit(1);
+  }
 
   startHealthServer();
   await checkSteam({ seed: true });

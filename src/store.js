@@ -10,81 +10,84 @@
                                            ▐
 */
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { asId, config, log } from './config.js';
+import pg from 'pg';
+import { config, log } from './config.js';
 
-function emptyState() {return { users: [], seen: [], lastCheckAt: null }}
+const pool = new pg.Pool({ connectionString: config.databaseUrl });
+
+const SCHEMA = `
+  CREATE TABLE IF NOT EXISTS steam_users (id text PRIMARY KEY);
+  CREATE TABLE IF NOT EXISTS seen_games (appid text PRIMARY KEY);
+  CREATE TABLE IF NOT EXISTS app_state (key text PRIMARY KEY, value text NOT NULL);
+`;
+
+let schemaPromise = null;
+function ensureSchema() {
+  if (!schemaPromise) {
+    schemaPromise = pool.query(SCHEMA).catch(e => { schemaPromise = null; throw e; });
+  }
+  return schemaPromise;
+}
 
 export class Store {
-  constructor(file) {
-    this.file = file;
-    this.state = emptyState();
-    this._queue = Promise.resolve();
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    this.load();
-  }
-
-  load() {
-    try {
-      if (!fs.existsSync(this.file)) return;
-      const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      this.state = {
-        users: Array.isArray(raw.users) ? [...new Set(raw.users.map(asId))] : [],
-        seen: Array.isArray(raw.seen) ? [...new Set(raw.seen.map(asId))] : [],
-        lastCheckAt: raw.lastCheckAt || null,
-      };
-    } catch (e) {
-      log('state load failed, starting empty:', e.message);
-      this.state = emptyState();
-    }
-  }
-
-  async _write() {
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    await fs.promises.writeFile(tmp, JSON.stringify(this.state, null, 2));
-    await fs.promises.rename(tmp, this.file);
-  }
-
-  persist() {
-    this._queue = this._queue.then(() => this._write()).catch(e => log('state save failed:', e.message));
-    return this._queue;
+  constructor() {
+    this._init = ensureSchema();
   }
 
   async addUser(id) {
-    const key = asId(id);
-    if (this.state.users.includes(key)) return false;
-    this.state.users.push(key);
-    await this.persist();
-    return true;
+    await this._init;
+    const key = String(id);
+    const res = await pool.query('INSERT INTO steam_users (id) VALUES ($1) ON CONFLICT (id) DO NOTHING', [key]);
+    return res.rowCount > 0;
   }
 
   async removeUser(id) {
-    const key = asId(id);
-    const before = this.state.users.length;
-    this.state.users = this.state.users.filter(x => x !== key);
-    if (before === this.state.users.length) return false;
-    await this.persist();
-    return true;
+    await this._init;
+    const key = String(id);
+    const res = await pool.query('DELETE FROM steam_users WHERE id = $1', [key]);
+    return res.rowCount > 0;
   }
 
   async markSeen(appids) {
-    const keys = Array.isArray(appids) ? appids.map(asId) : [asId(appids)];
-    const known = new Set(this.state.seen);
-    const fresh = keys.filter(k => !known.has(k));
-    if (!fresh.length) return false;
-    this.state.seen.push(...fresh);
-    await this.persist();
-    return true;
+    await this._init;
+    const keys = [...new Set((Array.isArray(appids) ? appids : [appids]).map(String))];
+    if (!keys.length) return false;
+    const placeholders = keys.map((_, i) => `($${i + 1})`).join(', ');
+    const res = await pool.query(`INSERT INTO seen_games (appid) VALUES ${placeholders} ON CONFLICT (appid) DO NOTHING`, keys);
+    return res.rowCount > 0;
   }
 
-  async touch(lastCheckAt = new Date().toISOString()) {
-    this.state.lastCheckAt = lastCheckAt;
-    await this.persist();
+  async touch(timestamp = new Date().toISOString()) {
+    await this._init;
+    await pool.query(
+      `INSERT INTO app_state (key, value) VALUES ('lastCheckAt', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [timestamp],
+    );
   }
 
-  snapshotUsers() {return [...this.state.users]}
-  hasSeen(appid) {return this.state.seen.includes(asId(appid))}
+  async snapshotUsers() {
+    await this._init;
+    const res = await pool.query('SELECT id FROM steam_users');
+    return res.rows.map(r => r.id);
+  }
+
+  async hasSeen(appid) {
+    await this._init;
+    const res = await pool.query('SELECT 1 FROM seen_games WHERE appid = $1', [String(appid)]);
+    return res.rowCount > 0;
+  }
+
+  async seenSet() {
+    await this._init;
+    const res = await pool.query('SELECT appid FROM seen_games');
+    return new Set(res.rows.map(r => r.appid));
+  }
+
+  async close() {
+    await pool.end();
+  }
 }
 
-export const store = new Store(config.stateFile);
+export const store = new Store();
+
+store._init.catch(e => log('store init failed:', e.message));

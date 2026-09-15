@@ -16,7 +16,7 @@ import { fetchFree } from './steam.js';
 import { sendGame } from './telegram.js';
 
 async function broadcast(game) {
-  for (const chatId of store.snapshotUsers()) {
+  for (const chatId of await store.snapshotUsers()) {
     try {
       await sendGame(chatId, game);
     } catch (e) {
@@ -42,9 +42,10 @@ export async function checkSteam({ seed = false } = {}) {
   checking = true;
   try {
     const games = await fetchFree();
-    const fresh = games.filter(g => !store.hasSeen(g.appid));
+    const seen = await store.seenSet();
+    const fresh = games.filter(g => !seen.has(g.appid));
 
-    if (seed && store.state.seen.length === 0) {
+    if (seed && seen.size === 0) {
       await store.markSeen(games.map(g => g.appid));
       await store.touch();
       log(`initial seed: ${games.length} games`);
